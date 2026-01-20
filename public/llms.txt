@@ -1,0 +1,6 @@
+## Pages
+- [Cadastro - Sistema de Vendas](/register): Crie sua conta no sistema de vendas
+- [Catálogo Inteligente - Schlosser](/clientedashboard): No description available
+- [Confirmação de Pedido - Schlosser Pro](/confirmacaopedidopublica): No description available
+- [Painel Admin](/admindashboard): No description available
+- [Portal do Vendedor](/vendedordashboard): No description available
