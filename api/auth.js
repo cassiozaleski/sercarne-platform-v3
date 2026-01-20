@@ -1,3 +1,22 @@
+export default async function handler(req, res) {
+  // ✅ libera preflight (CORS)
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // ✅ libera GET para teste / health-check
+  if (req.method === 'GET') {
+    return res.status(200).json({ ok: true, method: 'GET', route: '/api/auth' });
+  }
+
+  // 🔒 mantém POST como login
+  if (req.method !== 'POST') {
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+  }
+
+  // ... resto do seu código POST (login) aqui
+}
+
 import { getSheetsClient, getSheetConfig, getAllRows, json } from './_sheets.js';
 
 function safeJson(req) {
