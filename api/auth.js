@@ -32,28 +32,29 @@ function isTrue(v) {
   return s === 'true' || s === '1' || s === 'sim' || s === 'yes' || s === 'ativo' || s === 'x' || s === '✅';
 }
 
+function setCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
 export default async function handler(req, res) {
+  setCors(res);
+
+  // ✅ Preflight
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  // ✅ Health-check
+  if (req.method === 'GET') {
+    return json(res, 200, { ok: true, route: '/api/auth' });
+  }
+
+  // 🔒 Login somente via POST
+  if (req.method !== 'POST') {
+    return json(res, 405, { ok: false, error: 'Method not allowed' });
+  }
+
   try {
-    // CORS básico (não atrapalha e evita dor de cabeça)
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    // ✅ Preflight
-    if (req.method === 'OPTIONS') {
-      return res.status(200).end();
-    }
-
-    // ✅ Health-check
-    if (req.method === 'GET') {
-      return res.status(200).json({ ok: true, route: '/api/auth' });
-    }
-
-    // 🔒 Login somente POST
-    if (req.method !== 'POST') {
-      return json(res, 405, { ok: false, error: 'Method not allowed' });
-    }
-
     const payload = await safeJson(req);
     const login = payload.login;
     const password = payload.password;
@@ -64,8 +65,8 @@ export default async function handler(req, res) {
 
     const { spreadsheetId, usuariosSheet } = getSheetConfig();
     const sheets = await getSheetsClient();
-
     const rows = await getAllRows(sheets, spreadsheetId, usuariosSheet);
+
     if (!rows.length) return json(res, 401, { ok: false, error: 'USUARIOS vazio' });
 
     const header = rows[0] || [];
@@ -81,7 +82,6 @@ export default async function handler(req, res) {
     } : { nome: 0, login: 1, senha: 2, tipo: 3, ativo: 4, home: 5 };
 
     const wanted = norm(login);
-    let found = null;
 
     for (let r = 1; r < rows.length; r++) {
       const row = rows[r] || [];
@@ -93,37 +93,25 @@ export default async function handler(req, res) {
       const match = (norm(nome) === wanted) || (norm(loginB) === wanted);
       if (!match) continue;
 
-      if (!isTrue(ativo)) {
-        return json(res, 401, { ok: false, error: 'Usuário inativo' });
-      }
+      if (!isTrue(ativo)) return json(res, 401, { ok: false, error: 'Usuário inativo' });
+      if (String(senha) !== String(password)) return json(res, 401, { ok: false, error: 'Senha inválida' });
 
-      if (String(senha) !== String(password)) {
-        return json(res, 401, { ok: false, error: 'Senha inválida' });
-      }
+      const tipo = String(row[idx.tipo] || '').trim();
+      const homePath = (String(row[idx.home] || '').trim() || '/cliente');
 
-      found = {
-        nome: String(nome || loginB || '').trim(),
-        login: String(loginB || nome || '').trim(),
-        tipo: String(row[idx.tipo] || '').trim(),
-        homePath: String(row[idx.home] || '').trim() || '/cliente',
-      };
-      break;
+      return json(res, 200, {
+        ok: true,
+        user: {
+          name: String(nome || loginB || '').trim(),
+          login: String(loginB || nome || '').trim(),
+          role: slugRole(tipo),
+          tipo,
+          homePath,
+        }
+      });
     }
 
-    if (!found) return json(res, 401, { ok: false, error: 'Usuário não encontrado' });
-
-    const role = slugRole(found.tipo);
-
-    return json(res, 200, {
-      ok: true,
-      user: {
-        name: found.nome,
-        login: found.login,
-        role,
-        tipo: found.tipo,
-        homePath: found.homePath,
-      }
-    });
+    return json(res, 401, { ok: false, error: 'Usuário não encontrado' });
   } catch (err) {
     console.error(err);
     return json(res, 500, { ok: false, error: err?.message || 'Erro interno' });
