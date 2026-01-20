@@ -1,22 +1,3 @@
-export default async function handler(req, res) {
-  // ✅ libera preflight (CORS)
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // ✅ libera GET para teste / health-check
-  if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, method: 'GET', route: '/api/auth' });
-  }
-
-  // 🔒 mantém POST como login
-  if (req.method !== 'POST') {
-    return res.status(405).json({ ok: false, error: 'Method not allowed' });
-  }
-
-  // ... resto do seu código POST (login) aqui
-}
-
 import { getSheetsClient, getSheetConfig, getAllRows, json } from './_sheets.js';
 
 function safeJson(req) {
@@ -36,7 +17,6 @@ function norm(v) {
 function slugRole(tipo) {
   const s = norm(tipo);
   if (!s) return 'public';
-  // remove acentos básicos e espaços
   const noAccents = s
     .replace(/[áàâãä]/g, 'a')
     .replace(/[éèêë]/g, 'e')
@@ -54,11 +34,30 @@ function isTrue(v) {
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'Method not allowed' });
+    // CORS básico (não atrapalha e evita dor de cabeça)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    // ✅ Preflight
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+
+    // ✅ Health-check
+    if (req.method === 'GET') {
+      return res.status(200).json({ ok: true, route: '/api/auth' });
+    }
+
+    // 🔒 Login somente POST
+    if (req.method !== 'POST') {
+      return json(res, 405, { ok: false, error: 'Method not allowed' });
+    }
 
     const payload = await safeJson(req);
     const login = payload.login;
     const password = payload.password;
+
     if (!login || !password) {
       return json(res, 400, { ok: false, error: 'login e password são obrigatórios' });
     }
@@ -69,7 +68,6 @@ export default async function handler(req, res) {
     const rows = await getAllRows(sheets, spreadsheetId, usuariosSheet);
     if (!rows.length) return json(res, 401, { ok: false, error: 'USUARIOS vazio' });
 
-    // Se houver cabeçalho, tenta localizar pelas colunas; senão assume layout fixo (A-F)
     const header = rows[0] || [];
     const hasHeader = header.some(h => norm(h).includes('usuario') || norm(h).includes('login'));
 
@@ -92,7 +90,6 @@ export default async function handler(req, res) {
       const senha = row[idx.senha] ?? '';
       const ativo = row[idx.ativo] ?? '';
 
-      // aceita login por coluna A (nome) OU coluna B (login)
       const match = (norm(nome) === wanted) || (norm(loginB) === wanted);
       if (!match) continue;
 
@@ -116,6 +113,7 @@ export default async function handler(req, res) {
     if (!found) return json(res, 401, { ok: false, error: 'Usuário não encontrado' });
 
     const role = slugRole(found.tipo);
+
     return json(res, 200, {
       ok: true,
       user: {
@@ -128,6 +126,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error(err);
-    return json(res, 500, { ok: false, error: err.message || 'Erro interno' });
+    return json(res, 500, { ok: false, error: err?.message || 'Erro interno' });
   }
 }
