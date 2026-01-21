@@ -1,138 +1,203 @@
-import { getSheetsClient, getSheetConfig, getAllRows, json } from './_sheets.js';
+import crypto from "crypto";
+import { getSheetsClient, getSheetConfig, getAllRows, json } from "./_sheets.js";
 
-function safeJson(req) {
-  return new Promise((resolve) => {
-    let body = '';
-    req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch { resolve({}); }
-    });
-  });
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
 function norm(v) {
-  return String(v || '').trim().toLowerCase();
+  return String(v ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
-function slugRole(tipo) {
-  const s = norm(tipo);
-  if (!s) return 'public';
-  // remove acentos básicos e espaços
-  const noAccents = s
-    .replace(/[áàâãä]/g, 'a')
-    .replace(/[éèêë]/g, 'e')
-    .replace(/[íìîï]/g, 'i')
-    .replace(/[óòôõö]/g, 'o')
-    .replace(/[úùûü]/g, 'u')
-    .replace(/[ç]/g, 'c');
-  return noAccents.replace(/\s+/g, '').replace(/[^a-z0-9_]/g, '');
+function digitsOnly(v) {
+  return String(v ?? "").replace(/\D/g, "");
 }
 
 function isTrue(v) {
   const s = norm(v);
-  return s === 'true' || s === '1' || s === 'sim' || s === 'yes' || s === 'ativo' || s === 'x' || s === '✅';
+  return s === "true" || s === "verdadeiro" || s === "1" || s === "sim" || s === "s";
+}
+
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(String(s ?? ""), "utf8").digest("hex");
+}
+
+function normalizeRole(tipoRaw) {
+  const t = norm(tipoRaw);
+
+  if (t === "admin") return "admin";
+  if (t.includes("gestor")) return "gestorcomercial";
+  if (t.includes("representante")) return "representantepj";
+  if (t.includes("vendedor")) return "vendedor";
+
+  if (t.includes("cliente") && t.includes("b2b")) return "cliente_b2b";
+  if (t.includes("cliente") && t.includes("b2c")) return "cliente_b2c";
+  if (t.includes("cliente")) return "cliente";
+
+  // fallback
+  return t || "public";
+}
+
+function normalizeHomePath(role, homeFromSheet) {
+  const h = String(homeFromSheet ?? "").trim();
+  if (h && h.startsWith("/")) return h;
+
+  // defaults seguros por role
+  if (role === "admin") return "/admin";
+  if (role === "gestorcomercial") return "/gestorcomercial";
+  if (role === "vendedor" || role === "representantepj") return "/vendedor";
+  if (role === "cliente_b2b") return "/cliente_b2b";
+  if (role === "cliente_b2c") return "/cliente_b2c";
+  if (role === "cliente") return "/cliente";
+
+  return "/login";
+}
+
+function findHeaderIndexes(headerRow) {
+  const header = (headerRow || []).map((h) => norm(h));
+
+  // tenta achar por nome; se não achar, cai no padrão A-F
+  const idx = {
+    nome: header.findIndex((h) => h === "usuario" || h === "nome" || h.includes("usuario")),
+    login: header.findIndex((h) => h === "login"),
+    senha: header.findIndex((h) => h.includes("senha")),
+    tipo: header.findIndex((h) => h.includes("tipo")),
+    ativo: header.findIndex((h) => h.includes("ativo")),
+    home: header.findIndex((h) => (h.includes("app") && h.includes("login")) || h.includes("home")),
+  };
+
+  const fallback = { nome: 0, login: 1, senha: 2, tipo: 3, ativo: 4, home: 5 };
+
+  // se falhar qualquer coluna crítica, usa fallback
+  const critical = ["login", "senha", "tipo", "ativo"];
+  for (const k of critical) {
+    if (idx[k] < 0) return fallback;
+  }
+
+  // nome/home podem não existir, mas se existirem ok
+  if (idx.nome < 0) idx.nome = fallback.nome;
+  if (idx.home < 0) idx.home = fallback.home;
+
+  return idx;
 }
 
 export default async function handler(req, res) {
-  // ✅ CORS (Vercel/Browser)
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  setCors(res);
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
   }
 
-  // health-check: facilita depurar se a função está viva
-  if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, route: '/api/auth' });
+  if (req.method === "GET") {
+    // healthcheck /api/auth
+    return json(res, 200, { ok: true, route: "/api/auth" });
   }
+
+  if (req.method !== "POST") {
+    return json(res, 405, { ok: false, error: "Método não suportado" });
+  }
+
+  let body = req.body;
+  try {
+    if (typeof body === "string") body = JSON.parse(body);
+  } catch (_) {
+    // ignora, vamos tratar como vazio
+  }
+
+  const login = String(body?.login ?? "").trim();
+  const password = String(body?.password ?? "").trim();
+
+  if (!login || !password) {
+    return json(res, 400, { ok: false, error: "Informe login e senha" });
+  }
+
+  const wanted = norm(login);
+  const wantedDigits = digitsOnly(login);
 
   try {
-    if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'Method not allowed' });
-
-    const payload = await safeJson(req);
-    const login = payload.login;
-    const password = payload.password;
-    if (!login || !password) {
-      return json(res, 400, { ok: false, error: 'login e password são obrigatórios' });
-    }
-
-    const { spreadsheetId, usuariosSheet } = getSheetConfig();
+    const cfg = getSheetConfig();
     const sheets = await getSheetsClient();
 
-    const rows = await getAllRows(sheets, spreadsheetId, usuariosSheet);
-    if (!rows.length) return json(res, 401, { ok: false, error: 'USUARIOS vazio' });
+    const sheetName = cfg.SHEET_USUARIOS || "USUARIOS";
+    const rows = await getAllRows(sheets, cfg.GOOGLE_SHEET_ID, sheetName);
 
-    // Se houver cabeçalho, tenta localizar pelas colunas; senão assume layout fixo (A-F)
-    const header = rows[0] || [];
-    const hasHeader = header.some(h => norm(h).includes('usuario') || norm(h).includes('login'));
+    if (!rows || rows.length < 2) {
+      return json(res, 500, { ok: false, error: "Aba USUARIOS vazia ou não encontrada" });
+    }
 
-    const idx = hasHeader ? {
-      nome: header.findIndex(h => norm(h) === 'usuario' || norm(h) === 'nome' || norm(h).includes('usuario')),
-      login: header.findIndex(h => norm(h) === 'login'),
-      senha: header.findIndex(h => norm(h).includes('senha')),
-      tipo: header.findIndex(h => norm(h).includes('tipo')),
-      ativo: header.findIndex(h => norm(h).includes('ativo')),
-      home: header.findIndex(h => norm(h).includes('app') || norm(h).includes('login')),
-    } : { nome: 0, login: 1, senha: 2, tipo: 3, ativo: 4, home: 5 };
+    const idx = findHeaderIndexes(rows[0]);
 
-    const wanted = norm(login);
     let found = null;
 
     for (let r = 1; r < rows.length; r++) {
       const row = rows[r] || [];
-      const nome = row[idx.nome] ?? '';
-      const loginB = row[idx.login] ?? '';
-      const senha = row[idx.senha] ?? '';
-      const ativo = row[idx.ativo] ?? '';
 
-      // aceita login por coluna A (nome) OU coluna B (login)
-      const match = (norm(nome) === wanted) || (norm(loginB) === wanted);
+      const nome = row[idx.nome] ?? "";
+      const loginB = row[idx.login] ?? "";
+
+      const nomeNorm = norm(nome);
+      const loginNorm = norm(loginB);
+
+      const loginDigits = digitsOnly(loginB);
+
+      const match =
+        nomeNorm === wanted ||
+        loginNorm === wanted ||
+        (wantedDigits && loginDigits && loginDigits === wantedDigits);
+
       if (!match) continue;
 
+      const ativo = row[idx.ativo] ?? "";
       if (!isTrue(ativo)) {
-        return json(res, 401, { ok: false, error: 'Usuário inativo' });
+        return json(res, 401, { ok: false, error: "Usuário inativo" });
       }
 
-      if (String(senha) !== String(password)) {
-        return json(res, 401, { ok: false, error: 'Senha inválida' });
+      const senhaStored = String(row[idx.senha] ?? "").trim();
+      const tipoRaw = row[idx.tipo] ?? "";
+      const homeFromSheet = row[idx.home] ?? "";
+
+      // ✅ senha pode ser texto (zaleski9) OU SHA-256 hex (64 chars)
+      let passOk = false;
+      if (/^[a-f0-9]{64}$/i.test(senhaStored)) {
+        passOk = sha256Hex(password) === senhaStored.toLowerCase();
+      } else {
+        passOk = senhaStored === password;
       }
+
+      if (!passOk) {
+        return json(res, 401, { ok: false, error: "Senha inválida" });
+      }
+
+      const role = normalizeRole(tipoRaw);
+      const homePath = normalizeHomePath(role, homeFromSheet);
 
       found = {
-        nome: String(nome || loginB || '').trim(),
-        login: String(loginB || nome || '').trim(),
-        tipo: String(row[idx.tipo] || '').trim(),
-        homePath: String(row[idx.home] || '').trim() || '/cliente',
+        name: String(nome ?? "").trim() || "Usuário",
+        login: String(loginB ?? "").trim() || login,
+        role,
+        tipo: String(tipoRaw ?? "").trim(),
+        homePath,
       };
+
       break;
     }
 
-    if (!found) return json(res, 401, { ok: false, error: 'Usuário não encontrado' });
+    if (!found) {
+      return json(res, 401, { ok: false, error: "Credenciais inválidas" });
+    }
 
-    const role = slugRole(found.tipo);
-
-    // ✅ homePath seguro: evita loop se a planilha estiver errada
-    const roleLower = String(role || '').toLowerCase();
-    let safeHome = '/cliente';
-    if (roleLower === 'admin') safeHome = '/admin';
-    else if (roleLower === 'gestorcomercial') safeHome = '/gestorcomercial';
-    else if (['vendor', 'vendedor', 'representantepj'].includes(roleLower)) safeHome = '/vendedor';
-    else if (roleLower === 'cliente_b2b') safeHome = '/cliente_b2b';
-    else if (roleLower === 'cliente_b2c') safeHome = '/cliente_b2c';
-    const homePath = (found.homePath && String(found.homePath).startsWith('/')) ? found.homePath : safeHome;
-    return json(res, 200, {
-      ok: true,
-      user: {
-        name: found.nome,
-        login: found.login,
-        role,
-        tipo: found.tipo,
-        homePath,
-      }
-    });
+    return json(res, 200, { ok: true, user: found });
   } catch (err) {
-    console.error(err);
-    return json(res, 500, { ok: false, error: err.message || 'Erro interno' });
+    return json(res, 500, {
+      ok: false,
+      error: "Falha no servidor de autenticação",
+      detail: String(err?.message || err),
+    });
   }
 }
